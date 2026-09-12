@@ -1,0 +1,9 @@
+{
+  "language": "en-US",
+  "family": "en",
+  "dictionary": "ECDICT",
+  "dictionary_database": "scripts/data/ecdict.sqlite",
+  "sentence_endings": ".!?",
+  "asr_language": "en",
+  "tts_voice_hint": "en-US"
+}

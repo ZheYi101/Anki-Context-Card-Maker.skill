@@ -1,0 +1,4 @@
+interface:
+  display_name: "Anki Context Card Maker"
+  short_description: "Create multilingual Fushi-style context cards"
+  default_prompt: "Use $anki-context-card-maker to turn this text, subtitle, audio, or video material into reviewed Anki context cards."

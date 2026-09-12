@@ -1,0 +1,9 @@
+{
+  "language": "zh-CN",
+  "family": "zh",
+  "dictionary": "CC-CEDICT",
+  "dictionary_database": "scripts/data/cc-cedict.sqlite",
+  "sentence_endings": "。！？",
+  "asr_language": "zh",
+  "tts_voice_hint": "zh-CN"
+}

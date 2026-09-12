@@ -1,0 +1,9 @@
+{
+  "language": "ja-JP",
+  "family": "ja",
+  "dictionary": "JMdict",
+  "dictionary_database": "scripts/data/jmdict.sqlite",
+  "sentence_endings": "。！？",
+  "asr_language": "ja",
+  "tts_voice_hint": "ja-JP"
+}

@@ -1,0 +1,10 @@
+{
+  "fields": [
+    "Term", "Pronunciation", "Context", "TermAudio", "ContextAudio", "Visual",
+    "Definition", "PartOfSpeech", "Language", "TranslationLanguage", "Source",
+    "Note", "InstanceKey", "ResourceStatus"
+  ],
+  "front": "<div class=\"term\">{{Term}}</div><div class=\"context\">{{Context}}</div>",
+  "back": "{{FrontSide}}<hr>{{#Visual}}<div class=\"visual\">{{Visual}}</div>{{/Visual}}<div class=\"audio\">{{TermAudio}}{{ContextAudio}}</div>{{#Pronunciation}}<div class=\"pronunciation\">{{Pronunciation}}</div>{{/Pronunciation}}<div class=\"definition\">{{Definition}}</div>{{#PartOfSpeech}}<div>{{PartOfSpeech}}</div>{{/PartOfSpeech}}<div class=\"status\">{{ResourceStatus}}</div>",
+  "css": ".card{text-align:center;font-family:Arial,sans-serif;color:#202124;background:#faf8f1;padding:24px}.term{font-size:42px;color:#159ac5}.context{font-size:24px;line-height:1.45;margin:22px auto;max-width:850px}.context b{color:#159ac5}.visual img{max-width:100%;max-height:400px}.audio{min-height:28px;margin:12px}.pronunciation{color:#5f6368}.status{font-size:11px;color:#777;margin-top:16px}"
+}

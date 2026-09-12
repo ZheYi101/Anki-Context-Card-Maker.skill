@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+scripts/data/*
+!scripts/data/.gitkeep
+tests/out-*/
+downloads/
+anki-output/
+*.mp3
+*.mp4
+*.mkv
+*.webm
+*.mov
+*.gif
+*.wav
