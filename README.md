@@ -14,10 +14,10 @@ The default deck is isolated by language and material type: `Anki::<language>::V
 
 ## Install
 
-Copy or clone this repository into the Codex skills directory. The skill folder itself keeps the standard name `anki-context-card-maker`; the `.skill` suffix belongs to this distributable repository name.
+Clone this repository into the Codex skills directory. The skill folder itself keeps the standard name `anki-context-card-maker`; the `.skill` suffix belongs to this distributable repository name.
 
 ```powershell
-Copy-Item -Recurse .\anki-context-card-maker.skill "$env:USERPROFILE\.agents\skills\anki-context-card-maker"
+git clone https://github.com/ZheYi101/Anki-Context-Card-Maker.skill.git "$env:USERPROFILE\.agents\skills\anki-context-card-maker"
 ```
 
 Run `scripts/anki_cards.py --dry-run` first, inspect `manifest.json`, and only then run without `--dry-run` after approving the candidates and ensuring AnkiConnect is available. See [references/input-protocol.md](references/input-protocol.md) for lookup JSON and command examples.

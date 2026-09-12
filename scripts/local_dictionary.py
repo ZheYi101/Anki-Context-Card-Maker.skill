@@ -24,7 +24,7 @@ ECDICT_SOURCE_URL = "https://raw.githubusercontent.com/skywind3000/ECDICT/master
 PROVIDER_SOURCES = {
     "ecdict": ECDICT_SOURCE_URL,
     "cc-cedict": "https://www.mdbg.net/chinese/export/cedict/cedict_1_0_ts_utf-8_mdbg.txt.gz",
-    "jmdict": "https://ftp.edrdg.org/pub/Nihongo/JMdict_e.gz",
+    "jmdict": "https://www.edrdg.org/pub/Nihongo/JMdict_e.gz",
 }
 DEFAULT_DATABASE = Path(__file__).resolve().parent / "data" / "ecdict.sqlite"
 

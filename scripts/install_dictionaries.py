@@ -34,7 +34,7 @@ DOWNLOADS = {
         "license": "CC-CEDICT data is distributed under CC BY-SA 4.0; verify terms before redistribution.",
     },
     "jmdict": {
-        "url": "https://ftp.edrdg.org/pub/Nihongo/JMdict_e.gz",
+        "url": "https://www.edrdg.org/pub/Nihongo/JMdict_e.gz",
         "filename": "JMdict_e.xml",
         "compressed": True,
         "license": "JMdict data is subject to the EDRDG licence; verify terms before redistribution.",
