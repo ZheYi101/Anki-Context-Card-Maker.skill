@@ -4,7 +4,7 @@ The skill requires capabilities, not particular vendors.
 
 | Capability | Reuse first | Optional implementation | Missing capability |
 | --- | --- | --- | --- |
-| Timed subtitles | User SRT/VTT or provider captions | VideoCaptioner/Faster-Whisper adapter via `--transcribe` | Ask for an ASR app/service or exported SRT/VTT; suggest one only after confirmation |
+| Timed subtitles | User SRT/VTT or provider captions | Installed `videocaptioner` CLI with an explicitly selected local ASR engine, or the legacy Faster-Whisper-XXL adapter via `--transcribe`; see [videocaptioner.md](videocaptioner.md) | Ask for an exported SRT/VTT or local ASR configuration; do not install tools or download models |
 | Download | Existing downloader or local file | yt-dlp executable/module | Ask for an equivalent downloader; do not install silently |
 | Media extraction | Existing ffmpeg-compatible tool | ffmpeg on PATH or `--media-processor` | Generate text-only cards and mark media missing, or ask for a processor |
 | Term audio | User `word_audio` | PowerShell System.Speech via `--tts` | Keep the card and mark term audio missing |
