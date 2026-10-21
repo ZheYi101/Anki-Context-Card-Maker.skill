@@ -42,8 +42,16 @@ class Lookup:
     definition: str = ""
     part_of_speech: str = ""
     note: str = ""
+    examples: tuple[str, ...] = ()
     timestamp: float | None = None
     word_audio: Path | None = None
+    clip_start: float | None = None
+    clip_end: float | None = None
+    surface: str = ""
+
+    @property
+    def source_form(self) -> str:
+        return self.surface or self.term
 
 
 def parse_timestamp(value: str) -> float:
@@ -77,7 +85,11 @@ def parse_subtitles(path: Path) -> list[Cue]:
         while i < len(lines) and lines[i].strip():
             body.append(lines[i].strip())
             i += 1
-        raw = " ".join(body)
+        # Preserve line boundaries. YouTube rolling VTT cues commonly keep the
+        # previous caption on the first line and put newly spoken, timestamped
+        # words on the second. Flattening those lines makes the carry-over text
+        # look newly spoken and corrupts word-level alignment.
+        raw = "\n".join(body)
         text = html.unescape(re.sub(r"<[^>]+>", "", raw)).strip()
         if text and end > start:
             cues.append(Cue(len(cues) + 1, start, end, re.sub(r"\s+", " ", text), raw))
@@ -86,6 +98,7 @@ def parse_subtitles(path: Path) -> list[Cue]:
 
 def normalize(value: str) -> str:
     value = html.unescape(value).casefold()
+    value = re.sub(r"\s*-\s*", "-", value)
     return re.sub(r"\s+", " ", re.sub(r"[^\w\s'\u4e00-\u9fff\u3040-\u30ff-]", " ", value, flags=re.UNICODE)).strip()
 
 
@@ -99,7 +112,12 @@ def contains_term(text: str, term: str, language: str) -> bool:
         return False
     if language_family(language) in {"zh", "ja", "ko"}:
         return term_n in text_n
-    return re.search(rf"(?<![\w'-]){re.escape(term_n)}(?![\w'-])", text_n, re.I) is not None
+    if re.search(rf"(?<![\w'-]){re.escape(term_n)}(?![\w'-])", text_n, re.I):
+        return True
+    # Accept hyphen/space typography, never arbitrary stems or prefixes.
+    spaced_text = re.sub(r"[-\s]+", " ", text_n)
+    spaced_term = re.sub(r"[-\s]+", " ", term_n)
+    return bool(re.search(rf"(?<!\w){re.escape(spaced_term)}(?!\w)", spaced_text, re.I))
 
 
 def load_lookups(path: Path) -> list[Lookup]:
@@ -125,18 +143,39 @@ def load_lookups(path: Path) -> list[Lookup]:
             definition=str(item.get("definition", "")).strip(),
             part_of_speech=str(item.get("part_of_speech", "")).strip(),
             note=str(item.get("note", "")).strip(),
+            examples=tuple(str(example).strip() for example in (item.get("examples") or []) if str(example).strip()),
             timestamp=float(item["timestamp"]) if item.get("timestamp") is not None else None,
             word_audio=audio_path,
+            clip_start=float(item["clip_start"]) if item.get("clip_start") is not None else None,
+            clip_end=float(item["clip_end"]) if item.get("clip_end") is not None else None,
+            surface=str(item.get("surface", "")).strip(),
         ))
     return result
 
 
 def sentence_spans(cues: list[Cue], language: str, limit: float = 12.0) -> list[Cue]:
     """Join subtitle cues into sentence-sized ranges; CJK uses punctuation too."""
+    deduped: list[Cue] = []
+    for cue in cues:
+        if deduped and normalize(cue.text) == normalize(deduped[-1].text):
+            previous = deduped[-1]
+            deduped[-1] = Cue(previous.index, previous.start, cue.end, previous.text, previous.raw)
+        else:
+            deduped.append(cue)
     spans: list[Cue] = []
     pending: list[Cue] = []
-    for cue in cues:
+    for cue in deduped:
         if not cue.text or normalize(cue.text) in {"music", "[music]"}:
+            continue
+        # Split a cue that contains multiple sentences using proportional timing.
+        pieces = re.split(r"(?<=[.!?。！？])\s+|(?<=[。！？])(?=\S)", cue.text.strip())
+        if len(pieces) > 1:
+            total = max(1, sum(len(piece) for piece in pieces))
+            cursor = cue.start
+            for piece in pieces:
+                duration = (cue.end - cue.start) * len(piece) / total
+                spans.append(Cue(len(spans) + 1, cursor, cursor + duration, piece.strip()))
+                cursor += duration
             continue
         pending.append(cue)
         text = " ".join(c.text for c in pending)
@@ -148,14 +187,159 @@ def sentence_spans(cues: list[Cue], language: str, limit: float = 12.0) -> list[
     return spans
 
 
+def rolling_sentence_spans(cues: list[Cue]) -> list[Cue]:
+    """Collapse rolling YouTube captions into a non-repeating sentence timeline."""
+    tokens: list[tuple[str, float, float]] = []
+    for cue in cues:
+        words = re.findall(r"\S+", cue.text)
+        if not words:
+            continue
+        normalized = [normalize(word) for word in words]
+        overlap = 0
+        max_overlap = min(len(tokens), len(words), 40)
+        for size in range(max_overlap, 0, -1):
+            if [normalize(x[0]) for x in tokens[-size:]] == normalized[:size]:
+                overlap = size
+                break
+        for word in words[overlap:]:
+            tokens.append((word, cue.start, cue.end))
+    spans: list[Cue] = []
+    pending: list[tuple[str, float, float]] = []
+    for token in tokens:
+        pending.append(token)
+        if re.search(r"[.!?。！？][\"'’”）】]*$", token[0]):
+            spans.append(Cue(len(spans) + 1, pending[0][1], pending[-1][2], " ".join(x[0] for x in pending)))
+            pending = []
+    if pending:
+        spans.append(Cue(len(spans) + 1, pending[0][1], pending[-1][2], " ".join(x[0] for x in pending)))
+    return spans
+
+
+def rolling_sentence_context(item: Lookup, cues: list[Cue]) -> Cue | None:
+    """Find an exact lookup sentence using rolling cue word positions.
+
+    YouTube's auto captions repeat the tail of the previous cue. We fold that
+    repetition, retain a proportional timestamp for each newly added word, and
+    then use the supplied sentence when it is present. This is more precise
+    than assigning an entire rolling cue's start time to every word.
+    """
+    tokens: list[tuple[str, float, float]] = []
+    for cue in cues:
+        words_with_times = inline_word_tokens(cue)
+        words = [word for word, _, _ in words_with_times]
+        if not words:
+            continue
+        normalized = [normalize(word) for word in words]
+        overlap = 0
+        for size in range(min(len(tokens), len(words), 40), 0, -1):
+            if [normalize(x[0]) for x in tokens[-size:]] == normalized[:size]:
+                overlap = size
+                break
+        tokens.extend(words_with_times[overlap:])
+
+    spans: list[list[tuple[str, float, float]]] = []
+    pending: list[tuple[str, float, float]] = []
+    for token in tokens:
+        pending.append(token)
+        if re.search(r"[.!?。！？][\"'’”）】]*$", token[0]):
+            spans.append(pending)
+            pending = []
+    if pending:
+        spans.append(pending)
+
+    expected = [normalize(word).strip(".,!?;:") for word in re.findall(r"\S+", item.sentence or "")]
+    candidates: list[Cue] = []
+    exact_candidates: list[Cue] = []
+    for span in spans:
+        words = [normalize(word).strip(".,!?;:") for word, _, _ in span]
+        if not contains_term(" ".join(word for word, _, _ in span), item.source_form, "en-US"):
+            continue
+        match = True
+        if expected:
+            match = any(words[pos:pos + len(expected)] == expected for pos in range(max(0, len(words) - len(expected) + 1)))
+        candidate = Cue(len(candidates) + 1, span[0][1], span[-1][2], " ".join(word for word, _, _ in span))
+        candidates.append(candidate)
+        if not expected:
+            exact_candidates.append(candidate)
+        elif match:
+            for pos in range(len(words) - len(expected) + 1):
+                if words[pos:pos + len(expected)] == expected:
+                    exact_candidates.append(Cue(
+                        len(exact_candidates) + 1,
+                        span[pos][1],
+                        span[pos + len(expected) - 1][2],
+                        item.sentence or " ".join(word for word, _, _ in span[pos:pos + len(expected)]),
+                    ))
+                    break
+    candidates = exact_candidates if expected else candidates
+    if not candidates:
+        return None
+    if item.timestamp is None:
+        return candidates[0]
+    return min(candidates, key=lambda cue: abs((cue.start + cue.end) / 2 - item.timestamp))
+
+
+def inline_word_tokens(cue: Cue) -> list[tuple[str, float, float]]:
+    """Extract word-level timings from YouTube VTT inline timestamp tags."""
+    if not cue.raw or not re.search(r"<\d{2}:(?:\d{2}:)?\d{2}[.:]\d{3}>", cue.raw):
+        words = re.findall(r"\S+", cue.text)
+        duration = max(0.001, cue.end - cue.start)
+        return [(word, cue.start + duration * i / len(words), cue.start + duration * (i + 1) / len(words)) for i, word in enumerate(words)]
+    events: list[tuple[float, str]] = []
+    cursor = cue.start
+    # A rolling YouTube cue normally contains a carry-over line followed by
+    # one line of newly appearing words with inline timestamps. Only the
+    # timestamped line is authoritative for new-word timing; the carry-over
+    # line has already been emitted by earlier cues.
+    timestamped_lines = [
+        line for line in cue.raw.splitlines()
+        if re.search(r"<\d{2}:(?:\d{2}:)?\d{2}[.:]\d{3}>", line)
+    ]
+    raw = " ".join(timestamped_lines) if timestamped_lines else cue.raw
+    raw = re.sub(r"</?c(?:\.[^>]*)?>", "", raw)
+    pattern = re.compile(r"<(?P<time>\d{2}:(?:\d{2}:)?\d{2}[.:]\d{3})>|(?P<text>[^<]+)")
+    for match in pattern.finditer(raw):
+        if match.group("time"):
+            cursor = parse_timestamp(match.group("time"))
+        elif match.group("text"):
+            text = html.unescape(match.group("text")).strip()
+            if text:
+                events.append((cursor, text))
+    result: list[tuple[str, float, float]] = []
+    for index, (start, text) in enumerate(events):
+        next_start = events[index + 1][0] if index + 1 < len(events) else cue.end
+        words = re.findall(r"\S+", text)
+        if not words:
+            continue
+        for word_index, word in enumerate(words):
+            word_start = start + (next_start - start) * word_index / len(words)
+            word_end = start + (next_start - start) * (word_index + 1) / len(words)
+            result.append((word, word_start, word_end))
+    return result
+
+
+def clip_window(item: Lookup, context: Cue, padding: float) -> tuple[float, float]:
+    if item.clip_start is not None or item.clip_end is not None:
+        # Explicit boundaries are manually verified exceptions and therefore
+        # already represent the final safe window. Adding padding here could
+        # reintroduce a neighbouring sentence.
+        start = item.clip_start if item.clip_start is not None else context.start
+        end = item.clip_end if item.clip_end is not None else context.end
+        return max(0.0, start), max(start + 0.2, end)
+    start, end = context.start, context.end
+    # Keep media close to the sentence; wide padding is what caused adjacent
+    # sentences to be captured in rolling captions.
+    padding = min(max(padding, 0.0), 0.12)
+    return max(0.0, start - padding), max(start + 0.2, end + padding)
+
+
 def find_context(item: Lookup, cues: list[Cue], language: str) -> Cue | None:
     candidates = cues
     if item.sentence:
         expected = normalize(item.sentence)
         exact = [c for c in cues if expected in normalize(c.text)]
-        if exact:
-            candidates = exact
-    matches = [c for c in candidates if contains_term(c.text, item.term, language)]
+        candidates = exact
+    matches = [c for c in candidates if contains_term(c.text, item.source_form, language)]
     if not matches:
         return None
     if item.timestamp is None:
@@ -164,12 +348,11 @@ def find_context(item: Lookup, cues: list[Cue], language: str) -> Cue | None:
 
 
 def find_sentence(item: Lookup, spans: list[Cue], language: str) -> Cue | None:
-    candidates = [s for s in spans if contains_term(s.text, item.term, language)]
+    candidates = [s for s in spans if contains_term(s.text, item.source_form, language)]
     if item.sentence:
         expected = normalize(item.sentence)
         exact = [s for s in candidates if expected in normalize(s.text)]
-        if exact:
-            candidates = exact
+        candidates = exact
     if not candidates:
         return None
     if item.timestamp is None:
@@ -177,7 +360,38 @@ def find_sentence(item: Lookup, spans: list[Cue], language: str) -> Cue | None:
     return min(candidates, key=lambda s: abs((s.start + s.end) / 2 - item.timestamp))
 
 
+def refine_context(item: Lookup, context: Cue) -> Cue:
+    """Narrow a rolling-caption span to the exact supplied sentence words."""
+    if not item.sentence:
+        return context
+    source_words = re.findall(r"\S+", context.text)
+    target_words = re.findall(r"\S+", item.sentence)
+    source_norm = [normalize(word).strip(".,!?;:") for word in source_words]
+    target_norm = [normalize(word).strip(".,!?;:") for word in target_words]
+    for index in range(max(0, len(source_norm) - len(target_norm) + 1)):
+        if source_norm[index:index + len(target_norm)] == target_norm:
+            duration = context.end - context.start
+            start = context.start + duration * index / max(1, len(source_words))
+            end = context.start + duration * (index + len(target_words)) / max(1, len(source_words))
+            return Cue(context.index, start, end, item.sentence)
+    return context
+
+
 def source_fingerprint(path: Path | None, source: str) -> str:
+    """Prefer a logical locator; otherwise identify bytes, never path or mtime."""
+    if source:
+        return hashlib.sha256(source.encode("utf-8")).hexdigest()[:16]
+    if path and path.is_file():
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()[:16]
+    return hashlib.sha256(b"").hexdigest()[:16]
+
+
+def legacy_source_fingerprint(path: Path | None, source: str) -> str:
+    """Recognize notes created before stable source identity was introduced."""
     if path and path.is_file():
         stat = path.stat()
         source = f"{path.resolve()}:{stat.st_size}:{stat.st_mtime_ns}"
@@ -267,18 +481,75 @@ def resolve_executable(value: str | None, capability: str) -> str:
 def run_media(ffmpeg: str, source: Path, start: float, end: float, output: Path, kind: str) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
     duration = max(0.2, end - start)
-    if kind == "gif":
-        args = [ffmpeg, "-y", "-ss", f"{start:.3f}", "-i", str(source), "-t", f"{duration:.3f}", "-an", "-vf", "fps=6,scale=360:-2:flags=lanczos", "-loop", "0", str(output)]
+    if kind == "image":
+        args = [ffmpeg, "-y", "-ss", f"{start:.3f}", "-i", str(source), "-frames:v", "1", "-vf", "scale=640:-2:flags=lanczos", str(output)]
     else:
         args = [ffmpeg, "-y", "-ss", f"{start:.3f}", "-i", str(source), "-t", f"{duration:.3f}", "-vn", "-acodec", "libmp3lame", "-q:a", "4", str(output)]
     subprocess.run(args, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
 
-def synthesize(term: str, output: Path, executable: str) -> None:
+def synthesize(term: str, output: Path, executable: str, language: str) -> bool:
     escaped = term.replace("'", "''")
     target = str(output.resolve()).replace("'", "''")
-    command = "Add-Type -AssemblyName System.Speech; $v=New-Object System.Speech.Synthesis.SpeechSynthesizer; $v.SetOutputToWaveFile('" + target + "'); $v.Speak('" + escaped + "'); $v.Dispose()"
-    subprocess.run([executable, "-NoProfile", "-Command", command], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    locale = language.replace("'", "''")
+    command = ("$ErrorActionPreference='Stop'; Add-Type -AssemblyName System.Speech; "
+               "$v=New-Object System.Speech.Synthesis.SpeechSynthesizer; "
+               "$voices=@($v.GetInstalledVoices() | Where-Object { $_.Enabled -and $_.VoiceInfo.Culture.Name -eq '" + locale + "' }); "
+               "if($voices.Count -eq 0){$v.Dispose(); exit 3}; "
+               "$v.SelectVoice($voices[0].VoiceInfo.Name); "
+               "$v.SetOutputToWaveFile('" + target + "'); $v.Speak('" + escaped + "'); "
+               "Write-Output $v.Voice.Culture.Name; $v.Dispose()")
+    result = subprocess.run([executable, "-NoProfile", "-Command", command], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if result.returncode == 3:
+        return False
+    result.check_returncode()
+    return result.stdout.decode("utf-8").strip().casefold() == language.casefold()
+
+
+def default_tts() -> str | None:
+    if os.name == "nt":
+        return shutil.which("powershell") or shutil.which("pwsh")
+    return None
+
+
+def dictionary_definition(item: Lookup, dictionary: Any) -> str:
+    supplied = item.definition.strip()
+    raw_translation = getattr(dictionary, "translation", "") if dictionary else ""
+    raw_definition = getattr(dictionary, "definition", "") if dictionary else ""
+    return supplied or raw_translation.strip() or raw_definition.strip()
+
+
+def dictionary_html(item: Lookup, dictionary: Any) -> str:
+    """Render a readable, UTF-8-safe dictionary block for the back template."""
+    contextual = html_field(item.definition.strip())
+    translation = html_field((getattr(dictionary, "translation", "") if dictionary else "").replace("\\n", "\n"))
+    english = html_field((getattr(dictionary, "definition", "") if dictionary else "").replace("\\n", "\n"))
+    phonetic = html_field(getattr(dictionary, "phonetic", "") if dictionary else "")
+    pos = html_field(item.part_of_speech or getattr(dictionary, "pos", "") if dictionary else item.part_of_speech)
+    chunks = []
+    if pos:
+        chunks.append(f"<strong>{pos}</strong>")
+    if contextual:
+        chunks.append(f'<div class="primary-meaning"><strong>In this context</strong><br>{contextual}</div>')
+    else:
+        chunks.append('<div class="primary-meaning">Contextual meaning needs confirmation.</div>')
+    if item.note:
+        chunks.append(f'<div class="context-explanation">{html_field(item.note)}</div>')
+    dictionary_parts = []
+    if phonetic:
+        dictionary_parts.append(f'<span class="phonetic">{phonetic}</span>')
+    for label, value in (("Translation", translation), ("English definition", english)):
+        if value and value != contextual:
+            dictionary_parts.append(f'<div><strong>{label}</strong><br>{value}</div>')
+    if dictionary_parts:
+        chunks.append('<details class="dictionary-reference"><summary>Dictionary reference</summary>' + ''.join(dictionary_parts) + '</details>')
+    examples = list(item.examples)
+    if not examples and item.note:
+        examples = [part.strip() for part in re.findall(r"(?:Examples?|例句):\s*([^。]+(?:。|$))", item.note, flags=re.I)]
+    if examples:
+        rendered = "".join(f"<li>{html_field(example)}</li>" for example in examples)
+        chunks.append(f'<details class="examples"><summary>More examples</summary><ul>{rendered}</ul></details>')
+    return "".join(chunks)
 
 
 def stable_media_name(source: str, term: str, start: float, end: float, kind: str, suffix: str) -> str:
@@ -331,6 +602,9 @@ def build(args: argparse.Namespace) -> list[dict[str, Any]]:
         raise ValueError("Provide --text, --subtitles, --audio, --video, or --url")
     video = args.video
     audio = args.audio
+    for media in (video, audio):
+        if media is not None and not media.is_file():
+            raise ValueError(f"Media file does not exist: {media}")
     transcript_source = "provided"
     source_label = args.source or (str(material) if material else args.url or "text")
     subtitle_path = args.subtitles
@@ -367,69 +641,137 @@ def build(args: argparse.Namespace) -> list[dict[str, Any]]:
     else:
         raise ValueError("Audio/video input needs a timed --subtitles file")
     material_type = args.material_type or ("Video" if video or args.url else "Audio" if audio else "Text")
-    spans = sentence_spans(cues, target_language) if cues and cues[0].end > 0 else cues
+    spans = rolling_sentence_spans(cues) if cues and cues[0].end > 0 and language_family(target_language) == "en" else sentence_spans(cues, target_language)
     lookups = load_lookups(args.lookups)
-    source_id = source_fingerprint(video or audio or args.text, source_label)
+    source_path = video or audio or args.text or subtitle_path
+    source_id = source_fingerprint(source_path, args.source or args.url or "")
+    legacy_source_id = legacy_source_fingerprint(video or audio or args.text, source_label)
     args.output.mkdir(parents=True, exist_ok=True)
     manifest: list[dict[str, Any]] = []
     for item in lookups:
-        context = find_sentence(item, spans, target_language) if spans and spans[0].end > 0 else (Cue(1, 0, 0, item.sentence or cues[0].text) if item.sentence or cues else None)
+        context = (rolling_sentence_context(item, cues) if language_family(target_language) == "en" and cues and cues[0].end > 0 else None)
+        context = context or find_sentence(item, spans, target_language)
+        if context is not None and item.sentence and not contains_term(item.sentence, item.source_form, target_language):
+            context = None
+        if context is not None:
+            context = refine_context(item, context)
         record: dict[str, Any] = {"term": item.term, "matched": context is not None, "language": target_language, "translation_language": translation_language}
         if context is None:
-            record.update({"error": "No matching context"})
+            record.update({"error": "Term or supplied sentence not found in source", "ready_for_import": False, "quality_issues": ["source_context_unmatched"]})
             manifest.append(record)
             continue
         sentence = item.sentence or context.text
         key = instance_key(target_language, item.term, source_id, context.start, sentence)
-        record.update({"sentence": sentence, "start": context.start, "end": context.end, "instance_key": key, "source": source_label, "lookup": {"term": item.term, "definition": item.definition, "part_of_speech": item.part_of_speech, "note": item.note}})
+        record.update({"sentence": sentence, "surface": item.source_form, "start": context.start, "end": context.end, "instance_key": key, "legacy_instance_key": instance_key(target_language, item.term, legacy_source_id, context.start, sentence), "source": source_label, "lookup": {"term": item.term, "surface": item.surface, "definition": item.definition, "part_of_speech": item.part_of_speech, "note": item.note, "examples": list(item.examples)}})
+        record["ready_for_import"] = bool(item.definition.strip())
+        record["quality_issues"] = [] if record["ready_for_import"] else ["contextual_meaning_missing"]
         dictionary = dictionary_entry(item.term, target_language, args.dictionary)
-        status = {"subtitles": transcript_source, "dictionary": "provided" if item.definition else ("available" if dictionary else "missing"), "term_audio": "provided" if item.word_audio else "pending", "context_audio": "unavailable", "visual": "unavailable"}
+        status = {"identity_version": 2, "canonical_instance_key": key, "subtitles": transcript_source, "dictionary": "available" if dictionary else "missing", "contextual_meaning": "provided" if item.definition else "missing", "term_audio": "provided" if item.word_audio else "pending", "context_audio": "unavailable", "visual": "unavailable"}
+        record["dictionary"] = {"headword": getattr(dictionary, "word", item.term), "phonetic": getattr(dictionary, "phonetic", ""), "definition": getattr(dictionary, "definition", "") if dictionary else "", "translation": getattr(dictionary, "translation", "") if dictionary else "", "pos": getattr(dictionary, "pos", "") if dictionary else ""}
         if video or audio:
-            status["context_audio"] = "available" if context.end > context.start else "unavailable"
+            status["context_audio"] = "source_available" if context.end > context.start else "unavailable"
         if video:
-            status["visual"] = "available"
+            status["visual"] = "source_available"
         record["resource_status"] = status
+        if item.word_audio:
+            record["term_audio"] = str(item.word_audio)
         if not args.dry_run and (video or audio):
             ffmpeg_setting = args.media_processor or capability_value(config, "media", "ffmpeg", "executable", "path")
             ffmpeg = resolve_executable(ffmpeg_setting, "media_processor")
             stem = f"{len(manifest)+1:03d}_{re.sub(r'[^A-Za-z0-9_-]+', '_', item.term).strip('_') or 'term'}"
             base = args.output / stem
             source_media = video or audio
+            clip_start, clip_end = clip_window(item, context, args.padding)
+            record["clip_start"], record["clip_end"] = clip_start, clip_end
             if video:
-                visual = base.with_suffix(".gif"); run_media(ffmpeg, source_media, max(0, context.start-args.padding), context.end+args.padding, visual, "gif"); record["visual"] = str(visual)
-            context_audio = base.with_name(base.name + "-context.mp3"); run_media(ffmpeg, source_media, max(0, context.start-args.padding), context.end+args.padding, context_audio, "audio"); record["context_audio"] = str(context_audio)
+                visual = base.with_suffix(".png"); run_media(ffmpeg, source_media, clip_start, clip_end, visual, "image"); record["visual"] = str(visual); status["visual"] = "available"
+            context_audio = base.with_name(base.name + "-context.mp3"); run_media(ffmpeg, source_media, clip_start, clip_end, context_audio, "audio"); record["context_audio"] = str(context_audio); status["context_audio"] = "available"
             word_audio = base.with_name(base.name + "-term.mp3")
+            term_audio_prepared = False
             if item.word_audio:
                 shutil.copyfile(item.word_audio, word_audio)
+                term_audio_prepared = True
             else:
-                tts = args.tts or capability_value(config, "tts", "executable", "path")
+                tts = args.tts or capability_value(config, "tts", "executable", "path") or default_tts()
                 if tts:
-                    wav = base.with_name(base.name + "-term.wav"); synthesize(item.term, wav, resolve_executable(tts, "tts")); run_media(ffmpeg, wav, 0, 60, word_audio, "audio"); wav.unlink(missing_ok=True)
+                    wav = base.with_name(base.name + "-term.wav")
+                    if synthesize(item.term, wav, resolve_executable(tts, "tts"), target_language):
+                        run_media(ffmpeg, wav, 0, 60, word_audio, "audio")
+                        status["tts_locale"] = target_language
+                        term_audio_prepared = True
+                    else:
+                        status["term_audio"] = "missing"
+                    wav.unlink(missing_ok=True)
                 else:
                     status["term_audio"] = "missing"
-            if word_audio.is_file():
+            if term_audio_prepared and word_audio.is_file():
                 record["term_audio"] = str(word_audio)
+                status["term_audio"] = "available"
+        required_media = set(args.require_media or [])
+        if video:
+            required_media.update(("visual", "context_audio"))
+        elif audio:
+            required_media.add("context_audio")
+        for field in sorted(required_media):
+            if not record.get(field) or not Path(record[field]).is_file():
+                record["quality_issues"].append(f"required_media_missing:{field}")
+        record["ready_for_import"] = not record["quality_issues"]
         manifest.append(record)
     (args.output / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
-    if args.dry_run or args.prepare_only:
+    if args.dry_run or args.prepare_only or not any(record.get("ready_for_import") for record in manifest):
         return manifest
-    deck = args.deck or f"Anki::{target_language}::{material_type}"
+    deck = args.deck or ("English" if language_family(target_language) == "en" else f"Anki::{target_language}::{material_type}")
     model = args.model or "Anki Card Maker Context"
     anki = AnkiConnect(args.anki_url); anki.call("version"); anki.call("createDeck", deck=deck); anki.ensure_model(model, profile)
     existing_ids = anki.call("findNotes", query=f'deck:"{deck}"') or []
     existing = anki.call("notesInfo", notes=existing_ids) if existing_ids else []
-    by_key = {n.get("fields", {}).get("InstanceKey", {}).get("value", ""): n for n in existing if n.get("modelName") == model}
+    by_key: dict[str, list[dict]] = {}
+    def identity_metadata(note: dict) -> dict:
+        try:
+            value = json.loads(note.get("fields", {}).get("ResourceStatus", {}).get("value", "{}"))
+            return value if isinstance(value, dict) else {}
+        except (ValueError, TypeError):
+            return {}
+
+    for note in existing:
+        if note.get("modelName") != model:
+            continue
+        keys = {note.get("fields", {}).get("InstanceKey", {}).get("value", ""), identity_metadata(note).get("canonical_instance_key", "")}
+        for key in keys - {""}:
+            by_key.setdefault(key, []).append(note)
     for record in manifest:
-        if not record.get("matched"):
+        if not record.get("matched") or not record.get("ready_for_import"):
             continue
         dictionary = dictionary_entry(record["term"], target_language, args.dictionary)
-        definition = record["lookup"].get("definition") or getattr(dictionary, "translation", "") or getattr(dictionary, "definition", "") or ""
-        fields = {"Term": html_field(record["term"]), "Pronunciation": html_field(getattr(dictionary, "phonetic", "")), "Context": sentence_field(record["sentence"], record["term"], target_language), "TermAudio": f"[sound:{Path(record['term_audio']).name}]" if record.get("term_audio") else "", "ContextAudio": f"[sound:{Path(record['context_audio']).name}]" if record.get("context_audio") else "", "Visual": f'<img src="{Path(record["visual"]).name}">' if record.get("visual") else "", "Definition": html_field(definition), "PartOfSpeech": html_field(record["lookup"].get("part_of_speech", "")), "Language": target_language, "TranslationLanguage": translation_language, "Source": html_field(record["source"]), "Note": html_field(record["lookup"].get("note", "")), "InstanceKey": record["instance_key"], "ResourceStatus": html_field(json.dumps(record["resource_status"], ensure_ascii=False))}
+        lookup = Lookup(record["term"], sentence=record["sentence"], definition=record["lookup"].get("definition", ""), part_of_speech=record["lookup"].get("part_of_speech", ""), note=record["lookup"].get("note", ""), examples=tuple(record["lookup"].get("examples", [])))
+        fields = {"Term": html_field(record["term"]), "Pronunciation": html_field(getattr(dictionary, "phonetic", "")), "Context": sentence_field(record["sentence"], record.get("surface", record["term"]), target_language), "TermAudio": f"[sound:{Path(record['term_audio']).name}]" if record.get("term_audio") else "", "ContextAudio": f"[sound:{Path(record['context_audio']).name}]" if record.get("context_audio") else "", "Visual": f'<img src="{Path(record["visual"]).name}">' if record.get("visual") else "", "Definition": dictionary_html(lookup, dictionary), "PartOfSpeech": html_field(record["lookup"].get("part_of_speech", "") or getattr(dictionary, "pos", "")), "Language": target_language, "TranslationLanguage": translation_language, "Source": html_field(record["source"]), "Note": html_field(record["lookup"].get("note", "")), "InstanceKey": record["instance_key"], "ResourceStatus": html_field(json.dumps(record["resource_status"], ensure_ascii=False))}
         for field in ("visual", "term_audio", "context_audio"):
             if record.get(field):
                 name = stable_media_name(source_id, record["term"], record["start"], record["end"], field, Path(record[field]).suffix); anki.store(name, Path(record[field])); fields[{"visual":"Visual","term_audio":"TermAudio","context_audio":"ContextAudio"}[field]] = f'<img src="{name}">' if field == "visual" else f"[sound:{name}]"
-        note = by_key.get(record["instance_key"])
+        keyed = by_key.get(record["instance_key"]) or by_key.get(record["legacy_instance_key"], [])
+        if len(keyed) > 1:
+            record["import_error"] = "ambiguous_existing_instance"
+            continue
+        note = keyed[0] if keyed else None
+        if not note:
+            # A legacy physical fingerprint cannot be reconstructed after a move
+            # or mtime change. Reuse only a unique exact source/term/context match.
+            def plain(value: str) -> str:
+                return " ".join(html.unescape(re.sub(r"<[^>]+>", "", value)).split())
+
+            matches = [candidate for candidate in existing
+                       if candidate.get("modelName") == model
+                       and identity_metadata(candidate).get("identity_version") != 2
+                       and all(plain(candidate.get("fields", {}).get(field, {}).get("value", "")) == plain(value)
+                               for field, value in (("Term", record["term"]), ("Source", record["source"]), ("Context", record["sentence"]))) ]
+            if len(matches) > 1:
+                record["import_error"] = "ambiguous_existing_instance"
+                continue
+            note = matches[0] if matches else None
         if note:
+            old_key = note.get("fields", {}).get("InstanceKey", {}).get("value", "")
+            if old_key:
+                fields["InstanceKey"] = record["instance_key"] = old_key
             anki.call("updateNoteFields", note={"id": note["noteId"], "fields": fields}); record["note_id"] = note["noteId"]
         else:
             record["note_id"] = anki.call("addNote", note={"deckName": deck, "modelName": model, "fields": fields, "tags": args.tag})
@@ -441,14 +783,15 @@ def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__)
     source = p.add_argument_group("material")
     source.add_argument("--url"); source.add_argument("--video", type=Path); source.add_argument("--audio", type=Path); source.add_argument("--text", type=Path); source.add_argument("--subtitles", type=Path)
+    p.add_argument("--require-media", action="append", choices=["visual", "context_audio", "term_audio"], help="Keep draft until each requested media file has been prepared")
     p.add_argument("--lookups", type=Path, required=True); p.add_argument("--target-language", required=True); p.add_argument("--translation-language", default="zh-CN")
-    p.add_argument("--material-type", choices=["Video", "Audio", "Text"]); p.add_argument("--deck"); p.add_argument("--model"); p.add_argument("--profile", type=Path); p.add_argument("--dictionary"); p.add_argument("--tts"); p.add_argument("--transcriber"); p.add_argument("--transcriber-model-dir"); p.add_argument("--transcriber-model", default="large-v2"); p.add_argument("--transcribe", action="store_true"); p.add_argument("--media-processor"); p.add_argument("--capabilities", type=Path); p.add_argument("--downloader"); p.add_argument("--cookies", type=Path); p.add_argument("--download-dir", type=Path, default=Path("downloads")); p.add_argument("--output", type=Path, default=Path("anki-output")); p.add_argument("--padding", type=float, default=0.35); p.add_argument("--dry-run", action="store_true"); p.add_argument("--prepare-only", action="store_true"); p.add_argument("--anki-url", default="http://127.0.0.1:8765"); p.add_argument("--source"); p.add_argument("--tag", action="append", default=["anki_context_card"])
+    p.add_argument("--material-type", choices=["Video", "Audio", "Text"]); p.add_argument("--deck"); p.add_argument("--model"); p.add_argument("--profile", type=Path); p.add_argument("--dictionary"); p.add_argument("--tts"); p.add_argument("--transcriber"); p.add_argument("--transcriber-model-dir"); p.add_argument("--transcriber-model"); p.add_argument("--transcribe", action="store_true"); p.add_argument("--media-processor"); p.add_argument("--capabilities", type=Path); p.add_argument("--downloader"); p.add_argument("--cookies", type=Path); p.add_argument("--download-dir", type=Path, default=Path("downloads")); p.add_argument("--output", type=Path, default=Path("anki-output")); p.add_argument("--padding", type=float, default=0.0); p.add_argument("--dry-run", action="store_true"); p.add_argument("--prepare-only", action="store_true"); p.add_argument("--anki-url", default="http://127.0.0.1:8765"); p.add_argument("--source"); p.add_argument("--tag", action="append", default=["anki_context_card"])
     return p
 
 
 if __name__ == "__main__":
     try:
         result = build(parser().parse_args())
-        print(json.dumps({"count": len(result), "matched": sum(bool(r.get("matched")) for r in result)}, ensure_ascii=False))
+        print(json.dumps({"count": len(result), "matched": sum(bool(r.get("matched")) for r in result), "ready_for_import": sum(bool(r.get("ready_for_import")) for r in result)}, ensure_ascii=False))
     except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as exc:
         print(f"error: {exc}", file=sys.stderr); raise SystemExit(2)

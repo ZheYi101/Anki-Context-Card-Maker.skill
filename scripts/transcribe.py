@@ -29,6 +29,14 @@ def resolve_engine(engine: str | Path | None = None) -> Path:
     raise RuntimeError("No ASR adapter is configured; provide a timed SRT/VTT from another tool or configure VideoCaptioner/Faster-Whisper.")
 
 
+def whisper_language_code(language: str) -> str:
+    """Convert a BCP-47 tag such as en-US to Whisper's base language code."""
+    code = language.strip().replace("_", "-").split("-", 1)[0].lower()
+    if not code:
+        raise ValueError("The transcription language must not be empty")
+    return code
+
+
 def transcribe(media: Path, output_dir: Path, language: str, engine: str | Path | None = None, model_dir: str | Path | None = None, model: str = "large-v2") -> Path:
     executable = resolve_engine(engine)
     if not media.is_file():
@@ -37,7 +45,7 @@ def transcribe(media: Path, output_dir: Path, language: str, engine: str | Path 
     if not (models / f"faster-whisper-{model}").is_dir():
         raise RuntimeError(f"Local ASR model is missing: {models / f'faster-whisper-{model}'}")
     output_dir.mkdir(parents=True, exist_ok=True)
-    subprocess.run([str(executable), "-m", model, "--model_dir", str(models), "-l", language, "-o", str(output_dir), "-f", "srt", "--sentence", "--max_line_width", "1000", "--max_line_count", "1", "--beep_off", str(media)], check=True)
+    subprocess.run([str(executable), "-m", model, "--model_dir", str(models), "-l", whisper_language_code(language), "-o", str(output_dir), "-f", "srt", "--sentence", "--max_line_width", "1000", "--max_line_count", "1", "--beep_off", str(media)], check=True)
     subtitle = output_dir / f"{media.stem}.srt"
     if not subtitle.is_file() or not subtitle.read_text(encoding="utf-8-sig", errors="replace").strip():
         raise RuntimeError(f"ASR completed without an SRT subtitle: {subtitle}")

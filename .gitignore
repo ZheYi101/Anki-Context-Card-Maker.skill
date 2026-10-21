@@ -12,3 +12,6 @@ anki-output/
 *.mov
 *.gif
 *.wav
+*.bak*
+.DS_Store
+user-settings.json

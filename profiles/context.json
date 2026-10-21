@@ -1,10 +1,10 @@
 {
   "fields": [
     "Term", "Pronunciation", "Context", "TermAudio", "ContextAudio", "Visual",
-    "Definition", "PartOfSpeech", "Language", "TranslationLanguage", "Source",
-    "Note", "InstanceKey", "ResourceStatus"
+    "Definition", "PartOfSpeech", "Language", "TranslationLanguage", "Source", "Note",
+    "InstanceKey", "ResourceStatus"
   ],
   "front": "<div class=\"term\">{{Term}}</div><div class=\"context\">{{Context}}</div>",
-  "back": "{{FrontSide}}<hr>{{#Visual}}<div class=\"visual\">{{Visual}}</div>{{/Visual}}<div class=\"audio\">{{TermAudio}}{{ContextAudio}}</div>{{#Pronunciation}}<div class=\"pronunciation\">{{Pronunciation}}</div>{{/Pronunciation}}<div class=\"definition\">{{Definition}}</div>{{#PartOfSpeech}}<div>{{PartOfSpeech}}</div>{{/PartOfSpeech}}<div class=\"status\">{{ResourceStatus}}</div>",
-  "css": ".card{text-align:center;font-family:Arial,sans-serif;color:#202124;background:#faf8f1;padding:24px}.term{font-size:42px;color:#159ac5}.context{font-size:24px;line-height:1.45;margin:22px auto;max-width:850px}.context b{color:#159ac5}.visual img{max-width:100%;max-height:400px}.audio{min-height:28px;margin:12px}.pronunciation{color:#5f6368}.status{font-size:11px;color:#777;margin-top:16px}"
+  "back": "{{FrontSide}}<hr><div class=\"audio term-audio\">{{TermAudio}}{{#Pronunciation}}<span class=\"pronunciation\">{{Pronunciation}}</span>{{/Pronunciation}}</div><div class=\"audio context-audio\">{{ContextAudio}}</div>{{#Visual}}<div class=\"visual\">{{Visual}}</div>{{/Visual}}<div class=\"definition\">{{Definition}}</div>",
+  "css": ".card{text-align:center;font-family:Arial,sans-serif;color:#202124;background:#faf8f1;margin:0;padding:24px;box-sizing:border-box;overflow-x:hidden}.card *{box-sizing:border-box}.term{font-size:42px;color:#159ac5}.context{font-size:24px;line-height:1.45;margin:22px auto;max-width:850px}.context b{color:#159ac5}.visual{width:100%;max-width:480px;margin:12px auto;overflow:hidden}.visual img{display:block;width:100%;height:auto;max-height:270px;margin:0 auto}.audio{min-height:28px;margin:10px}.pronunciation{margin-left:10px;color:#5f6368}.definition{max-width:800px;margin:18px auto;text-align:left;background:#f3f0e8;padding:16px;line-height:1.55}.primary-meaning{margin-top:10px}.dictionary-definition{margin-top:12px;color:#444;font-style:italic}.in-context{margin-top:14px;padding-top:12px;border-top:1px solid #d7d2c7}.source-sentence{margin-top:7px;font-style:italic}.context-explanation{margin-top:7px;color:#444}.examples{margin-top:14px}.examples ul{margin:6px 0 0 20px;padding:0}@media (max-width:540px){.card{padding:16px 12px}.term{font-size:34px}.context{font-size:21px}.definition{padding:14px}}"
 }

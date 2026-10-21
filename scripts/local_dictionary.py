@@ -152,17 +152,19 @@ def lookup(word: str, database_path: Path = DEFAULT_DATABASE, language: str = "e
     return LocalDictionaryEntry(*row) if row else None
 
 
-def provider_for_language(language: str, dictionaries_dir: Path | None = None) -> Path:
+def provider_for_language(language: str, dictionaries_dir: Path | None = None) -> Path | None:
     """Resolve a local database by language without making it a hard dependency."""
     root = dictionaries_dir or DEFAULT_DATABASE.parent
     family = language.casefold().split("-")[0]
     names = {"en": "ecdict.sqlite", "zh": "cc-cedict.sqlite", "ja": "jmdict.sqlite"}
-    return root / names.get(family, "ecdict.sqlite")
+    name = names.get(family)
+    return root / name if name else None
 
 
 def lookup_provider(word: str, language: str, dictionaries_dir: Path | None = None) -> LocalDictionaryEntry | None:
     """Look up a term using the configured local provider for its language."""
-    return lookup(word, provider_for_language(language, dictionaries_dir), language=language)
+    database = provider_for_language(language, dictionaries_dir)
+    return lookup(word, database, language=language) if database is not None else None
 
 
 def metadata(database_path: Path = DEFAULT_DATABASE) -> dict[str, str]:
